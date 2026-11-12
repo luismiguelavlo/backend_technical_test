@@ -1,0 +1,30 @@
+# MySQL for local development + tests (podman-compose up -d).
+# Values can be overridden via shell env or a `.env` file (DB_* keys).
+services:
+  mysql:
+    image: docker.io/library/mysql:8.4
+    container_name: ci4-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_DATABASE:-ci4}
+      MYSQL_USER: ${DB_USERNAME:-ci4}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-ci4}
+      DB_TEST_DATABASE: ${DB_TEST_DATABASE:-ci4_test}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql_data:

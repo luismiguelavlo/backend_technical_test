@@ -57,7 +57,8 @@ class Filters extends BaseFilters
         'after' => [
             'pagecache',   // Web Page Caching
             'performance', // Performance Metrics
-            'toolbar',     // Debug Toolbar
+            // 'toolbar' moved to $globals so the API can be excluded: it appends
+            // HTML to text/html responses, e.g. the 204 CORS preflight reply.
         ],
     ];
 
@@ -77,6 +78,7 @@ class Filters extends BaseFilters
             // 'invalidchars',
         ],
         'after' => [
+            'toolbar' => ['except' => ['users', 'users/*']], // Debug Toolbar (no-op outside development)
             // 'honeypot',
             // 'secureheaders',
         ],
@@ -106,5 +108,10 @@ class Filters extends BaseFilters
      *
      * @var array<string, array<string, list<string>>>
      */
-    public array $filters = [];
+    public array $filters = [
+        'cors' => [
+            'before' => ['users', 'users/*'],
+            'after'  => ['users', 'users/*'],
+        ],
+    ];
 }

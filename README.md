@@ -1,69 +1,181 @@
-# CodeIgniter 4 Application Starter
+# Users API — CodeIgniter 4 backend
 
-## What is CodeIgniter?
+REST API (JSON) for user management, consumed by a separate React frontend. Built for the Developer Technical Test (`docs/Developer_Technical_Test.md`).
 
-CodeIgniter is a PHP full-stack web framework that is light, fast, flexible and secure.
-More information can be found at the [official site](https://codeigniter.com).
+- **Stack:** PHP 8.2+, CodeIgniter 4.7, MySQL 8.x
+- **API base URL expected by the frontend:** `http://localhost:8080` (no `/api` prefix)
+- **Database schema:** migrations in `app/Database/Migrations/`; design notes in `docs/database-design.md`
 
-This repository holds a composer-installable app starter.
-It has been built from the
-[development repository](https://github.com/codeigniter4/CodeIgniter4).
+## Requirements
 
-More information about the plans for version 4 can be found in [CodeIgniter 4](https://forum.codeigniter.com/forumdisplay.php?fid=28) on the forums.
+- PHP 8.2+ with `intl`, `mbstring`, `mysqli` (and `json`, enabled by default)
+- Composer 2
+- MySQL 8.x — local install, or the provided `podman-compose.yml` / Docker Compose
 
-You can read the [user guide](https://codeigniter.com/user_guide/)
-corresponding to the latest version of the framework.
+## Run the backend
 
-## Installation & updates
+```bash
+# 1. Dependencies
+composer install
 
-`composer create-project codeigniter4/appstarter` then `composer update` whenever
-there is a new release of the framework.
+# 2. Configuration (never commit .env)
+cp .env.example .env
+#   edit database.default.* / database.tests.* (credentials)
+#   and CORS_ALLOWED_ORIGINS (frontend origin, default http://localhost:5173)
 
-When updating, check the release notes to see if there are any changes you might need to apply
-to your `app` folder. The affected files can be copied or merged from
-`vendor/codeigniter4/framework/app`.
+# 3. Database — option A: container (creates `ci4` and `ci4_test`, user ci4/ci4)
+podman-compose up -d          # or: docker compose -f podman-compose.yml up -d
+#   then in .env set username = ci4, password = ci4 for both groups
+#   option B: own MySQL — create the `ci4` and `ci4_test` databases (utf8mb4)
 
-## Setup
+# 4. Schema + sample data (20 users)
+php spark migrate
+php spark db:seed UserSeeder
 
-Copy `env` to `.env` and tailor for your app, specifically the baseURL
-and any database settings.
+# 5. Serve
+php spark serve               # http://localhost:8080
+```
 
-## Important Change with index.php
+Check: `curl http://localhost:8080/users` returns `200` with `{ "data": [...] }`.
 
-`index.php` is no longer in the root of the project! It has been moved inside the *public* folder,
-for better security and separation of components.
+Reset the data: `php spark migrate:refresh && php spark db:seed UserSeeder`.
 
-This means that you should configure your web server to "point" to your project's *public* folder, and
-not to the project root. A better practice would be to configure a virtual host to point there. A poor practice would be to point your web server to the project root and expect to enter *public/...*, as the rest of your logic and the
-framework are exposed.
+## Tests
 
-**Please** read the user guide for a better explanation of how CI4 works!
+Tests use the `tests` DB group (`database.tests.*` in `.env`); migrations run automatically.
 
-## Repository Management
+```bash
+composer test                                  # whole suite (vendor/bin/phpunit)
+vendor/bin/phpunit tests/feature/UsersApiTest.php
+vendor/bin/phpunit --filter testMethodName
+```
 
-We use GitHub issues, in our main repository, to track **BUGS** and to track approved **DEVELOPMENT** work packages.
-We use our [forum](http://forum.codeigniter.com) to provide SUPPORT and to discuss
-FEATURE REQUESTS.
+- `tests/feature/UsersApiTest.php` — HTTP tests for every endpoint and status code (200/201/204/400/404/415/422, CORS)
+- `tests/database/UserModelTest.php` — model validation and persistence
+- `tests/unit/DuplicateKeyTranslatorTest.php` — duplicate-key → 422 mapping
 
-This repository is a "distribution" one, built by our release preparation script.
-Problems with it can be raised on our forum, or as issues in the main repository.
+## Frontend
 
-## Server Requirements
+The React app (TypeScript) lives in a separate project. It must call the API at `http://localhost:8080`, and its origin must be listed in `CORS_ALLOWED_ORIGINS`. Run instructions: see the frontend README.
 
-PHP version 8.2 or higher is required, with the following extensions installed:
+## API
 
-- [intl](http://php.net/manual/en/intl.requirements.php)
-- [mbstring](http://php.net/manual/en/mbstring.installation.php)
+JSON REST API for the `users` resource.
 
-> [!WARNING]
-> - The end of life date for PHP 7.4 was November 28, 2022.
-> - The end of life date for PHP 8.0 was November 26, 2023.
-> - The end of life date for PHP 8.1 was December 31, 2025.
-> - If you are still using below PHP 8.2, you should upgrade immediately.
-> - The end of life date for PHP 8.2 will be December 31, 2026.
+- **Base URL:** `http://localhost:8080` (`php spark serve`). No `/api` prefix.
+- **Requirements:** PHP 8.2+ (CodeIgniter 4.7), MySQL 8.x.
+- Bodies (`POST`, `PUT`) must be JSON with `Content-Type: application/json`.
 
-Additionally, make sure that the following extensions are enabled in your PHP:
+### Endpoints
 
-- json (enabled by default - don't turn it off)
-- [mysqlnd](http://php.net/manual/en/mysqlnd.install.php) if you plan to use MySQL
-- [libcurl](http://php.net/manual/en/curl.requirements.php) if you plan to use the HTTP\CURLRequest library
+| Method   | Path          | Success                  | Errors          |
+| -------- | ------------- | ------------------------ | --------------- |
+| `GET`    | `/users`      | `200` `{ "data": [User] }` | `500`         |
+| `GET`    | `/users/{id}` | `200` `{ "data": User }` | `404`, `500`    |
+| `POST`   | `/users`      | `201` `{ "data": User }` | `400`, `415`, `422`, `500` |
+| `PUT`    | `/users/{id}` | `200` `{ "data": User }` | `400`, `404`, `415`, `422`, `500` |
+| `DELETE` | `/users/{id}` | `204` (empty body)       | `404`, `500`    |
+| `OPTIONS`| `/users`, `/users/{id}` | `204` (CORS preflight) | — |
+
+- `{id}` must be digits; anything else (`/users/abc`, `/users/-1`) is `404 Not found`.
+- `PUT` is a **full replacement**: same required fields as `POST`; an omitted `telephone` is cleared (`null`).
+- `id`, `created_at`, `updated_at` and unknown fields in the body are ignored. The ID always comes from the URL.
+
+### User resource
+
+| Field        | Type            | Rules                                            |
+| ------------ | --------------- | ------------------------------------------------ |
+| `id`         | int             | read-only                                        |
+| `first_name` | string          | required, max 100                                |
+| `last_name`  | string          | required, max 100                                |
+| `email`      | string          | required, valid email, max 254, unique; stored trimmed + lowercased |
+| `gender`     | string          | required, one of `male`, `female`, `other`       |
+| `telephone`  | string \| null  | optional, max 20, digits, spaces and `+-()`      |
+| `age`        | int             | required, 1–120                                  |
+| `created_at` | string          | read-only, `YYYY-MM-DD HH:MM:SS`                 |
+| `updated_at` | string          | read-only, `YYYY-MM-DD HH:MM:SS`                 |
+
+### Examples
+
+Create a user:
+
+```bash
+curl -i -X POST http://localhost:8080/users \
+  -H 'Content-Type: application/json' \
+  -d '{"first_name":"Ana","last_name":"García","email":"ana@example.com","gender":"female","telephone":"+34 600 000 000","age":34}'
+```
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json; charset=UTF-8
+
+{
+  "data": {
+    "id": 1,
+    "first_name": "Ana",
+    "last_name": "García",
+    "email": "ana@example.com",
+    "gender": "female",
+    "telephone": "+34 600 000 000",
+    "age": 34,
+    "created_at": "2026-11-12 10:00:00",
+    "updated_at": "2026-11-12 10:00:00"
+  }
+}
+```
+
+Other calls:
+
+```bash
+curl http://localhost:8080/users                 # 200 { "data": [...] }
+curl http://localhost:8080/users/1               # 200 { "data": {...} }
+curl -X PUT http://localhost:8080/users/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"first_name":"Ana","last_name":"López","email":"ana@example.com","gender":"female","age":35}'
+curl -i -X DELETE http://localhost:8080/users/1  # 204, empty body
+```
+
+### Error contract
+
+Every error response has the same shape. `status` equals the HTTP status code and `errors` is always a JSON object (`{}` when there are no field errors, never `[]`):
+
+```json
+{
+  "status": 422,
+  "message": "Validation failed",
+  "errors": { "email": "El email ya está registrado." }
+}
+```
+
+Field messages come from the model's validation rules (the custom ones are in Spanish).
+
+| Code  | `message`                | When                                                                 |
+| ----- | ------------------------ | -------------------------------------------------------------------- |
+| `400` | `Malformed JSON body`    | Invalid JSON, empty body, or JSON that is not an object (e.g. `[]`)  |
+| `404` | `User not found`         | The ID does not exist (including `/users/0`)                         |
+| `404` | `Not found`              | No matching route under `/users` (e.g. `/users/abc`, `/users/1/foo`) |
+| `415` | `Unsupported media type` | `POST`/`PUT` without `Content-Type: application/json`                |
+| `422` | `Validation failed`      | Field validation errors (`errors.<field>`), including duplicate email |
+| `500` | `Internal server error`  | Any unexpected error. No details are returned in any environment; they are logged in `writable/logs/` |
+
+### CORS
+
+CORS uses CodeIgniter's built-in `cors` filter on the `/users` routes:
+
+- Allowed origins: `CORS_ALLOWED_ORIGINS` (comma-separated, exact match). If it is empty or unset, no origin is allowed. `*` is ignored.
+- Methods: `GET, POST, PUT, DELETE, OPTIONS`. Headers: `Content-Type, Authorization, If-Match`.
+- Credentials are not supported (`Access-Control-Allow-Credentials` is never sent).
+
+### `.env` variables
+
+Copy `.env.example` to `.env` and adjust:
+
+| Variable                     | Example                  | Purpose                                      |
+| ---------------------------- | ------------------------ | -------------------------------------------- |
+| `CI_ENVIRONMENT`             | `development`            | Environment                                  |
+| `app.baseURL`                | `'http://localhost:8080/'` | API base URL                               |
+| `database.default.*`         | see `.env.example`       | Main DB (`hostname`, `database`, `username`, `password`, `DBDriver = MySQLi`, `port`, …) |
+| `database.tests.*`           | see `.env.example`       | DB used by `composer test`                   |
+| `CORS_ALLOWED_ORIGINS`       | `http://localhost:5173`  | Frontend origin(s), e.g. `http://localhost:5173,https://app.example.com` |
+
+Keep `DBDebug = true` (the default in `app/Config/Database.php`). The API relies on database exceptions to turn duplicate-email races into `422`.

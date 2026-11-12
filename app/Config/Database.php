@@ -42,7 +42,7 @@ class Database extends Config
         'strictOn'     => false,
         'failover'     => [],
         'port'         => 3306,
-        'numberNative' => false,
+        'numberNative' => true, // INT columns as PHP int (API returns "id": 1, not "1")
         'foundRows'    => false,
         'dateFormat'   => [
             'date'     => 'Y-m-d',
@@ -180,6 +180,7 @@ class Database extends Config
         'strictOn'    => true,
         'failover'    => [],
         'port'        => 3306,
+        'numberNative' => true, // same as $default: INT columns as PHP int
         'foreignKeys' => true,
         'busyTimeout' => 1000,
         'synchronous' => null,

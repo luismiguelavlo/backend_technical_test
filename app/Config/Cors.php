@@ -34,7 +34,7 @@ class Cors extends BaseConfig
          *   - ['http://localhost:8080']
          *   - ['https://www.example.com']
          */
-        'allowedOrigins' => [],
+        'allowedOrigins' => [], // Unused: see allowedOriginsPatterns / __construct().
 
         /**
          * Origin regex patterns for the `Access-Control-Allow-Origin` header.
@@ -47,7 +47,7 @@ class Cors extends BaseConfig
          * E.g.:
          *   - ['https://\w+\.example\.com']
          */
-        'allowedOriginsPatterns' => [],
+        'allowedOriginsPatterns' => [], // Set from CORS_ALLOWED_ORIGINS in __construct().
 
         /**
          * Weather to send the `Access-Control-Allow-Credentials` header.
@@ -68,7 +68,7 @@ class Cors extends BaseConfig
          *
          * @see https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers
          */
-        'allowedHeaders' => [],
+        'allowedHeaders' => ['Content-Type', 'Authorization', 'If-Match'],
 
         /**
          * Set headers to expose.
@@ -93,7 +93,7 @@ class Cors extends BaseConfig
          *
          * @see https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Methods
          */
-        'allowedMethods' => [],
+        'allowedMethods' => ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 
         /**
          * Set how many seconds the results of a preflight request can be cached.
@@ -102,4 +102,27 @@ class Cors extends BaseConfig
          */
         'maxAge' => 7200,
     ];
+
+    /**
+     * Allowed origins come from `CORS_ALLOWED_ORIGINS` (comma-separated).
+     * Empty or missing → no origin allowed (fail closed). `*` is never allowed.
+     *
+     * Loaded as exact-match (preg_quote'd) patterns rather than `allowedOrigins`:
+     * with a single `allowedOrigins` entry CI4 always sends that origin, even to
+     * unlisted origins; patterns echo the Origin only when it matches (+ Vary: Origin).
+     */
+    public function __construct()
+    {
+        parent::__construct();
+
+        $origins = array_filter(
+            array_map('trim', explode(',', (string) env('CORS_ALLOWED_ORIGINS', ''))),
+            static fn (string $origin): bool => $origin !== '' && $origin !== '*',
+        );
+
+        $this->default['allowedOriginsPatterns'] = array_values(array_map(
+            static fn (string $origin): string => preg_quote($origin, '#'),
+            $origins,
+        ));
+    }
 }

@@ -2,9 +2,11 @@
 
 namespace Config;
 
+use App\Exceptions\ApiExceptionHandler;
 use CodeIgniter\Config\BaseConfig;
 use CodeIgniter\Debug\ExceptionHandler;
 use CodeIgniter\Debug\ExceptionHandlerInterface;
+use CodeIgniter\HTTP\IncomingRequest;
 use Psr\Log\LogLevel;
 use Throwable;
 
@@ -80,6 +82,17 @@ class Exceptions extends BaseConfig
      */
     public string $deprecationLogLevel = LogLevel::WARNING;
 
+    /**
+     * --------------------------------------------------------------------------
+     * API ROUTE PREFIXES
+     * --------------------------------------------------------------------------
+     * First URI segments served by the JSON API. Exceptions on these routes
+     * are rendered with the JSON error contract by ApiExceptionHandler.
+     *
+     * @var list<string>
+     */
+    public array $apiPrefixes = ['users'];
+
     /*
      * DEFINE THE HANDLERS USED
      * --------------------------------------------------------------------------
@@ -101,6 +114,26 @@ class Exceptions extends BaseConfig
      */
     public function handler(int $statusCode, Throwable $exception): ExceptionHandlerInterface
     {
+        if ($this->isApiRequest()) {
+            return new ApiExceptionHandler($this);
+        }
+
         return new ExceptionHandler($this);
+    }
+
+    /**
+     * Matches the whole first segment (`users`, `users/...`), never `usersfoo`.
+     */
+    private function isApiRequest(): bool
+    {
+        $request = service('request');
+
+        if (! $request instanceof IncomingRequest) {
+            return false;
+        }
+
+        $firstSegment = explode('/', trim($request->getPath(), '/'), 2)[0];
+
+        return in_array($firstSegment, $this->apiPrefixes, true);
     }
 }
