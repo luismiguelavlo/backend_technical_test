@@ -1,7 +1,8 @@
 # SPEC 02 — API REST JSON de /users con CORS
 
 > **Status:** Implemented · **Depends on:** SPEC 01 · **Date:** 2026-11-12
-> **Amended by:** [SPEC 03](03-optimistic-concurrency.md) — `version` en el recurso, cabecera `ETag`, `PUT` condicionado por `If-Match` (412/428) y CORS que expone `ETag`. Las secciones afectadas lo indican.
+> **Amended by:** [SPEC 03](03-optimistic-concurrency.md) — `version` en el recurso, cabecera `ETag`, `PUT` condicionado por `If-Match` (412/428) y CORS que expone `ETag`.
+> **Amended by:** [SPEC 04](04-users-list-query.md) — `GET /users` devuelve una página (`{ data, meta }`) con búsqueda, filtro, orden y cursor; parámetros inválidos → 400. Las secciones afectadas lo indican.
 > **Objective:** Exponer el CRUD JSON de `/users` (200/201/204/400/404/415/422/500) sobre `UserModel`, con contrato de respuesta uniforme, CORS configurable por `.env` y tests de integración contra la BD de pruebas.
 
 ## Scope
@@ -23,7 +24,7 @@
 **Out of scope (for future specs):**
 
 - Autenticación, JWT, sesiones, CSRF.
-- Paginación, búsqueda, ordenación (el envelope queda preparado para `meta`).
+- Paginación, búsqueda, ordenación (el envelope queda preparado para `meta`). → Implementado en SPEC 04.
 - Control de concurrencia (`If-Match`/`ETag`, 409/412); solo se permite la cabecera en CORS. → Implementado en SPEC 03.
 - `PATCH` / actualización parcial.
 - Capa de servicio (`UserService`).
@@ -78,7 +79,7 @@ Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
 
 | Endpoint             | Código | Body                      |
 | -------------------- | ------ | ------------------------- |
-| `GET /users`         | 200    | `{ "data": [User, ...] }` |
+| `GET /users`         | 200    | `{ "data": [User, ...] }` — *SPEC 04: una página + `meta`* |
 | `GET /users/{id}`    | 200    | `{ "data": User }`        |
 | `POST /users`        | 201    | `{ "data": User }`        |
 | `PUT /users/{id}`    | 200    | `{ "data": User }`        |
@@ -101,6 +102,7 @@ Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
 | Código | `message`                | Cuándo                                                                                   |
 | ------ | ------------------------ | ---------------------------------------------------------------------------------------- |
 | 400    | `Malformed JSON body`    | JSON inválido, body vacío o JSON que no es objeto                                        |
+| 400    | `Invalid query parameters` | *SPEC 04:* query string inválido en `GET /users` (`errors.<param>`)                    |
 | 404    | `User not found`         | ID inexistente o `/users/0`                                                              |
 | 404    | `Not found`              | Ruta API sin match (`/users/abc`, `/users/-1`, `/users/1/foo`) vía `ApiExceptionHandler` |
 | 412    | `Precondition failed`    | *SPEC 03:* `If-Match` no coincide con la versión actual (`errors.version`, `ETag` actual) |
@@ -161,7 +163,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 **Rutas y contrato**
 
 - [ ] `php spark routes` lista exactamente `GET/POST /users`, `GET/PUT/DELETE /users/([0-9]+)` y `OPTIONS` para ambas, más `GET /`.
-- [ ] `GET /users` → 200, `Content-Type: application/json`, body `{ "data": [...] }` con todos los usuarios.
+- [ ] `GET /users` → 200, `Content-Type: application/json`, body `{ "data": [...] }` con todos los usuarios. (*SPEC 04:* primera página de 20 + `meta`; criterios de listado en SPEC 04.)
 - [ ] `GET /users/{id}` existente → 200 con `{ "data": {...} }` y los 9 campos del recurso (10 con `version` desde SPEC 03).
 - [ ] `GET /users/999999`, `/users/0`, `/users/-1`, `/users/abc` → 404 con `status`, `message` y `errors: {}`.
 - [ ] Ruta inexistente bajo `/users` (p. ej. `/users/1/foo`) → 404 JSON con el contrato.
@@ -270,7 +272,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 ## What is **not** in this spec
 
 - Autenticación, JWT, sesiones, CSRF.
-- Paginación, búsqueda, ordenación.
+- Paginación, búsqueda, ordenación. → SPEC 04.
 - Control de concurrencia (`If-Match`/`ETag`, 409/412). → SPEC 03.
 - `PATCH` / actualización parcial.
 - `UserService`.

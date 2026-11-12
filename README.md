@@ -38,7 +38,7 @@ php spark serve               # http://localhost:8080
 
 Check: `curl http://localhost:8080/users` returns `200` with `{ "data": [...] }`.
 
-Reset the data: `php spark migrate:refresh && php spark db:seed UserSeeder`.
+Reset the data: `php spark migrate:refresh && php spark db:seed UserSeeder`. The seeder is idempotent: re-running it skips users that already exist.
 
 ## Tests
 
@@ -50,8 +50,8 @@ vendor/bin/phpunit tests/feature/UsersApiTest.php
 vendor/bin/phpunit --filter testMethodName
 ```
 
-- `tests/feature/UsersApiTest.php` — HTTP tests for every endpoint and status code (200/201/204/400/404/412/415/422/428, CORS, concurrent edits)
-- `tests/database/UserModelTest.php` — model validation and persistence
+- `tests/feature/UsersApiTest.php` — HTTP tests for every endpoint and status code (200/201/204/400/404/412/415/422, CORS, concurrent edits, list search/sort/pagination)
+- `tests/database/UserModelTest.php` — model validation, normalization, persistence and seeder idempotency
 - `tests/unit/DuplicateKeyTranslatorTest.php` — duplicate-key → 422 mapping
 
 ## Frontend
@@ -70,16 +70,16 @@ JSON REST API for the `users` resource.
 
 | Method   | Path          | Success                  | Errors          |
 | -------- | ------------- | ------------------------ | --------------- |
-| `GET`    | `/users`      | `200` `{ "data": [User] }` | `500`         |
+| `GET`    | `/users`      | `200` `{ "data": [User], "meta": {...} }` (one page) | `400`, `500` |
 | `GET`    | `/users/{id}` | `200` `{ "data": User }` | `404`, `500`    |
 | `POST`   | `/users`      | `201` `{ "data": User }` | `400`, `415`, `422`, `500` |
-| `PUT`    | `/users/{id}` | `200` `{ "data": User }` | `400`, `404`, `412`, `415`, `422`, `428`, `500` |
+| `PUT`    | `/users/{id}` | `200` `{ "data": User }` | `400`, `404`, `412`, `415`, `422`, `500` |
 | `DELETE` | `/users/{id}` | `204` (empty body)       | `404`, `500`    |
 | `OPTIONS`| `/users`, `/users/{id}` | `204` (CORS preflight) | — |
 
 - `{id}` must be digits; anything else (`/users/abc`, `/users/-1`) is `404 Not found`.
 - `PUT` is a **full replacement**: same required fields as `POST`; an omitted `telephone` is cleared (`null`).
-- `PUT` requires `If-Match` with the user's current ETag (see [Concurrent edits](#concurrent-edits-optimistic-locking)).
+- `PUT` accepts an optional `If-Match` with the user's ETag to detect concurrent edits (see [Concurrent edits](#concurrent-edits-optimistic-locking)).
 - `id`, `version`, `created_at`, `updated_at` and unknown fields in the body are ignored. The ID always comes from the URL.
 
 ### User resource
@@ -87,11 +87,11 @@ JSON REST API for the `users` resource.
 | Field        | Type            | Rules                                            |
 | ------------ | --------------- | ------------------------------------------------ |
 | `id`         | int             | read-only                                        |
-| `first_name` | string          | required, max 100                                |
-| `last_name`  | string          | required, max 100                                |
+| `first_name` | string          | required, max 100; stored trimmed                |
+| `last_name`  | string          | required, max 100; stored trimmed                |
 | `email`      | string          | required, valid email, max 254, unique; stored trimmed + lowercased |
 | `gender`     | string          | required, one of `male`, `female`, `other`       |
-| `telephone`  | string \| null  | optional, max 20, digits, spaces and `+-()`      |
+| `telephone`  | string \| null  | optional, max 20, digits, spaces and `+-()`; trimmed, `` stored as `null` |
 | `age`        | int             | required, 1–120                                  |
 | `version`    | int             | read-only; starts at 1, +1 on every successful `PUT`; also sent as `ETag` |
 | `created_at` | string          | read-only, `YYYY-MM-DD HH:MM:SS`                 |
@@ -131,7 +131,7 @@ ETag: "1"
 Other calls:
 
 ```bash
-curl http://localhost:8080/users                 # 200 { "data": [...] }
+curl http://localhost:8080/users                 # 200 { "data": [...first 20], "meta": {...} }
 curl -i http://localhost:8080/users/1            # 200 { "data": {...} } + ETag: "1"
 curl -X PUT http://localhost:8080/users/1 \
   -H 'Content-Type: application/json' \
@@ -157,22 +157,55 @@ Field messages come from the model's validation rules (the custom ones are in Sp
 | Code  | `message`                | When                                                                 |
 | ----- | ------------------------ | -------------------------------------------------------------------- |
 | `400` | `Malformed JSON body`    | Invalid JSON, empty body, or JSON that is not an object (e.g. `[]`)  |
+| `400` | `Invalid query parameters` | `GET /users` with an invalid `q`, `gender`, `sort`, `dir`, `limit` or `cursor` (`errors.<param>`) |
 | `404` | `User not found`         | The ID does not exist (including `/users/0`)                         |
 | `404` | `Not found`              | No matching route under `/users` (e.g. `/users/abc`, `/users/1/foo`) |
 | `412` | `Precondition failed`    | `If-Match` does not match the current version (someone saved first); `errors.version`, response `ETag` = current version |
 | `415` | `Unsupported media type` | `POST`/`PUT` without `Content-Type: application/json`                |
 | `422` | `Validation failed`      | Field validation errors (`errors.<field>`), including duplicate email |
-| `428` | `Precondition required`  | `PUT` without `If-Match` (`errors.If-Match`)                          |
 | `500` | `Internal server error`  | Any unexpected error. No details are returned in any environment; they are logged in `writable/logs/` |
+
+### Listing: search, filter, sort and pagination
+
+`GET /users` returns **one page**, filtered and sorted in the database. Query parameters (all optional):
+
+| Parameter    | Values                                         | Default |
+| ------------ | ---------------------------------------------- | ------- |
+| `q`          | up to 100 chars; each word must be a **prefix** of `first_name`, `last_name` or `email` (case- and accent-insensitive). `%` and `_` are literal. | — |
+| `gender`     | `male`, `female`, `other`                      | all     |
+| `sort`       | `id`, `first_name`, `last_name`, `email`, `age` | `id`   |
+| `dir`        | `asc`, `desc`                                  | `asc`   |
+| `limit`      | 1–100                                          | `20`    |
+| `cursor`     | `meta.next_cursor` of the previous page        | first page |
+| `with_total` | `1` to also count all matches (`meta.total`)   | off     |
+
+```json
+{
+  "data": [ { "id": 7, "...": "..." } ],
+  "meta": { "limit": 20, "sort": "last_name", "dir": "asc", "next_cursor": "eyJzIjoi…", "total": 57 }
+}
+```
+
+- **Keyset (cursor) pagination, not `OFFSET`.** The next page is `WHERE sort > last_value OR (sort = last_value AND id > last_id) ORDER BY sort, id LIMIT n`. Its cost does not depend on how deep the page is. `next_cursor` is `null` on the last page. It is opaque and tied to `sort` + `dir`.
+- `meta.total` is `null` unless `with_total=1`, because an exact `COUNT(*)` scans every match. The frontend asks for it only on the first page of each search.
+- Indexes: one `(column, id)` per sortable column (`idx_users_last_name_id`, `idx_users_first_name_id`, `idx_users_age_id`), plus the PK and `uk_users_email`.
+- Invalid parameters → `400 Invalid query parameters` with `errors.<param>` (e.g. `sort=password`, `limit=500`, a cursor from another sort).
+
+```bash
+curl 'http://localhost:8080/users?q=ana%20gar&gender=female&sort=last_name&limit=10&with_total=1'
+curl 'http://localhost:8080/users?sort=last_name&limit=10&cursor=<meta.next_cursor>'
+```
+
+Design: `specs/04-users-list-query.md`.
 
 ### Concurrent edits (optimistic locking)
 
-Two clients can load the same user and save in turn. A plain `PUT` would let the second save silently overwrite the first one, so `PUT` is conditional:
+Two clients can load the same user and save in turn. A plain `PUT` would let the second save silently overwrite the first one, so `PUT` can be made conditional:
 
 1. `GET /users/{id}`, `POST` and `PUT` return `ETag: "<version>"`. `version` is also in the body, including in `GET /users`.
 2. The client sends it back with `If-Match: "<version>"` on `PUT /users/{id}`.
 3. The server applies the change with a single `UPDATE ... WHERE id = ? AND version = ?` and increments `version`, so there is no read-then-write race.
-4. If the version changed since the client loaded the user, the response is `412` with the current `ETag`. The client must reload the user and reapply its change. A `PUT` without `If-Match` gets `428`.
+4. If the version changed since the client loaded the user, the response is `412` with the current `ETag`. The client must reload the user and reapply its change. A `PUT` without `If-Match` is unconditional (last write wins), so plain clients keep the `200/404/422` contract of the test; the bundled frontend always sends `If-Match`.
 
 Only strong ETags of the form `"<digits>"` are accepted. `*` and weak ETags (`W/"1"`) never match. Design: `specs/03-optimistic-concurrency.md`.
 

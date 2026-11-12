@@ -2,6 +2,7 @@
 
 namespace Tests\Database;
 
+use App\Database\Seeds\UserSeeder;
 use App\Models\UserModel;
 use CodeIgniter\Test\CIUnitTestCase;
 use CodeIgniter\Test\DatabaseTestTrait;
@@ -157,6 +158,44 @@ final class UserModelTest extends CIUnitTestCase
         $this->assertFalse($result);
         $this->assertArrayHasKey('email', $this->model->errors());
         $this->seeNumRecords(1, 'users', []);
+    }
+
+    public function testInsertTrimsNamesAndTelephone(): void
+    {
+        $id = $this->model->insert($this->validUser([
+            'first_name' => '  Ana ',
+            'last_name'  => ' García  ',
+            'telephone'  => ' +34 600 111 222 ',
+        ]));
+
+        $row = $this->model->find($id);
+        $this->assertSame('Ana', $row['first_name']);
+        $this->assertSame('García', $row['last_name']);
+        $this->assertSame('+34 600 111 222', $row['telephone']);
+    }
+
+    public function testInsertWithEmptyOrBlankTelephoneStoresNull(): void
+    {
+        $id1 = $this->model->insert($this->validUser(['telephone' => '']));
+        $id2 = $this->model->insert($this->validUser(['email' => 'b@example.com', 'telephone' => '   ']));
+
+        $this->assertNull($this->model->find($id1)['telephone']);
+        $this->assertNull($this->model->find($id2)['telephone']);
+    }
+
+    public function testInsertWithBlankNameIsRejected(): void
+    {
+        $this->assertFalse($this->model->insert($this->validUser(['last_name' => '   '])));
+        $this->assertArrayHasKey('last_name', $this->model->errors());
+    }
+
+    public function testUserSeederInsertsTwentyUsersAndIsIdempotent(): void
+    {
+        $this->seed(UserSeeder::class);
+        $this->seeNumRecords(20, 'users', []);
+
+        $this->seed(UserSeeder::class);
+        $this->seeNumRecords(20, 'users', []);
     }
 
     public function testUpdateWithOwnEmailSucceeds(): void

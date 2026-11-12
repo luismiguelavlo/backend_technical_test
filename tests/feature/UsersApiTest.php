@@ -116,7 +116,7 @@ final class UsersApiTest extends CIUnitTestCase
         $this->assertSame([], get_object_vars($body->errors));
     }
 
-    public function testIndexReturnsAllUsersInDataEnvelope(): void
+    public function testIndexReturnsFirstPageWithMeta(): void
     {
         $this->createUser();
         $this->createUser(['email' => 'otro@example.com']);
@@ -126,16 +126,220 @@ final class UsersApiTest extends CIUnitTestCase
         $result->assertStatus(200);
         $result->assertHeader('Content-Type', 'application/json; charset=UTF-8');
         $body = $this->json($result);
-        $this->assertSame(['data'], array_keys($body));
+        $this->assertSame(['data', 'meta'], array_keys($body));
         $this->assertCount(2, $body['data']);
+        $this->assertSame(
+            ['limit' => 20, 'sort' => 'id', 'dir' => 'asc', 'next_cursor' => null, 'total' => null],
+            $body['meta'],
+        );
     }
 
     public function testIndexWithNoUsersReturnsEmptyList(): void
     {
-        $result = $this->get('users');
+        $result = $this->get('users?with_total=1');
 
         $result->assertStatus(200);
-        $this->assertSame(['data' => []], $this->json($result));
+        $body = $this->json($result);
+        $this->assertSame([], $body['data']);
+        $this->assertNull($body['meta']['next_cursor']);
+        $this->assertSame(0, $body['meta']['total']);
+    }
+
+    // --- List: search, filter, sort, keyset pagination (specs/04) ------------
+
+    /**
+     * @param list<array<string, mixed>> $users overrides for validUser()
+     *
+     * @return list<int> ids in insertion order
+     */
+    private function createUsers(array $users): array
+    {
+        return array_map(fn (array $overrides): int => $this->createUser($overrides), $users);
+    }
+
+    /**
+     * @return list<int|string> one column of the page rows
+     */
+    private function column(TestResponse $result, string $field = 'id'): array
+    {
+        return array_column($this->json($result)['data'], $field);
+    }
+
+    /**
+     * Follows next_cursor until the end and returns every id, in order.
+     *
+     * @return list<int>
+     */
+    private function walkAllPages(string $query): array
+    {
+        $ids    = [];
+        $cursor = null;
+
+        for ($guard = 0; $guard < 50; $guard++) {
+            $result = $this->get('users?' . $query . ($cursor === null ? '' : '&cursor=' . $cursor));
+            $result->assertStatus(200);
+            $ids    = [...$ids, ...$this->column($result)];
+            $cursor = $this->json($result)['meta']['next_cursor'];
+
+            if ($cursor === null) {
+                return $ids;
+            }
+        }
+
+        $this->fail('Pagination did not terminate.');
+    }
+
+    public function testCursorPaginationVisitsEveryUserOnceInOrder(): void
+    {
+        $ids = [];
+        for ($i = 0; $i < 7; $i++) {
+            $ids[] = $this->createUser(['email' => "u{$i}@example.com"]);
+        }
+
+        $this->assertSame($ids, $this->walkAllPages('limit=3'));
+        $this->assertSame(array_reverse($ids), $this->walkAllPages('limit=3&dir=desc'));
+    }
+
+    public function testSortByColumnWithTiesIsStableAcrossPages(): void
+    {
+        // Three "García" (ties on last_name) force the id tie-breaker.
+        [$garciaA, $zapata, $garciaB, $alonso, $garciaC] = $this->createUsers([
+            ['email' => 'a@example.com', 'last_name' => 'García'],
+            ['email' => 'b@example.com', 'last_name' => 'Zapata'],
+            ['email' => 'c@example.com', 'last_name' => 'García'],
+            ['email' => 'd@example.com', 'last_name' => 'Alonso'],
+            ['email' => 'e@example.com', 'last_name' => 'García'],
+        ]);
+
+        $this->assertSame([$alonso, $garciaA, $garciaB, $garciaC, $zapata], $this->walkAllPages('sort=last_name&limit=2'));
+        $this->assertSame([$zapata, $garciaC, $garciaB, $garciaA, $alonso], $this->walkAllPages('sort=last_name&dir=desc&limit=2'));
+    }
+
+    public function testSortByAge(): void
+    {
+        [$forty, $twenty, $thirty] = $this->createUsers([
+            ['email' => 'a@example.com', 'age' => 40],
+            ['email' => 'b@example.com', 'age' => 20],
+            ['email' => 'c@example.com', 'age' => 30],
+        ]);
+
+        $this->assertSame([$twenty, $thirty, $forty], $this->walkAllPages('sort=age&limit=1'));
+    }
+
+    public function testSearchMatchesPrefixOfNameOrEmailCaseAndAccentInsensitive(): void
+    {
+        [$lucia, $mario, $pedro] = $this->createUsers([
+            ['email' => 'lucia@example.com', 'first_name' => 'Lucía', 'last_name' => 'Pérez'],
+            ['email' => 'mario@example.com', 'first_name' => 'Mario', 'last_name' => 'Luciano'],
+            ['email' => 'pedro.luz@example.com', 'first_name' => 'Pedro', 'last_name' => 'Gómez'],
+        ]);
+
+        $this->assertSame([$lucia, $mario], $this->column($this->get('users?q=LUCI')));
+        $this->assertSame([$lucia], $this->column($this->get('users?q=perez')));
+        $this->assertSame([$pedro], $this->column($this->get('users?q=pedro.l')));
+        // Prefix, not substring: "ucia" is inside "Lucía" but not at the start.
+        $this->assertSame([], $this->column($this->get('users?q=ucia')));
+    }
+
+    public function testSearchWithSeveralTermsRequiresAllOfThem(): void
+    {
+        [$anaGarcia] = $this->createUsers([
+            ['email' => 'a@example.com', 'first_name' => 'Ana', 'last_name' => 'García'],
+            ['email' => 'b@example.com', 'first_name' => 'Ana', 'last_name' => 'López'],
+            ['email' => 'c@example.com', 'first_name' => 'Luis', 'last_name' => 'García'],
+        ]);
+
+        $this->assertSame([$anaGarcia], $this->column($this->get('users?q=' . rawurlencode('  ana   gar '))));
+    }
+
+    public function testSearchEscapesLikeWildcards(): void
+    {
+        $this->createUser();
+
+        $this->assertSame([], $this->column($this->get('users?q=%25')));
+        $this->assertSame([], $this->column($this->get('users?q=_')));
+        $this->assertSame([], $this->column($this->get('users?q=!')));
+    }
+
+    public function testSearchTreatsWildcardsLiterally(): void
+    {
+        [$percent] = $this->createUsers([
+            ['email' => 'a@example.com', 'first_name' => '100%'],
+            ['email' => 'b@example.com', 'first_name' => '1000'],
+        ]);
+
+        $this->assertSame([$percent], $this->column($this->get('users?q=100%25')));
+    }
+
+    public function testGenderFilterCombinesWithSearchAndTotal(): void
+    {
+        [$anaF] = $this->createUsers([
+            ['email' => 'a@example.com', 'first_name' => 'Ana', 'gender' => 'female'],
+            ['email' => 'b@example.com', 'first_name' => 'Ana', 'gender' => 'male'],
+            ['email' => 'c@example.com', 'first_name' => 'Eva', 'gender' => 'female'],
+        ]);
+
+        $result = $this->get('users?gender=female&q=ana&with_total=1');
+
+        $this->assertSame([$anaF], $this->column($result));
+        $this->assertSame(1, $this->json($result)['meta']['total']);
+    }
+
+    public function testTotalCountsAllMatchesNotJustThePage(): void
+    {
+        $this->createUsers([['email' => 'a@example.com'], ['email' => 'b@example.com'], ['email' => 'c@example.com']]);
+
+        $meta = $this->json($this->get('users?limit=2&with_total=1'))['meta'];
+
+        $this->assertSame(3, $meta['total']);
+        $this->assertNotNull($meta['next_cursor']);
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function invalidListQueryProvider(): iterable
+    {
+        yield 'sort not whitelisted' => ['sort=password', 'sort'];
+        yield 'sort SQL injection' => ['sort=' . rawurlencode('id;DROP TABLE users'), 'sort'];
+        yield 'dir' => ['dir=up', 'dir'];
+        yield 'limit zero' => ['limit=0', 'limit'];
+        yield 'limit too big' => ['limit=101', 'limit'];
+        yield 'limit not a number' => ['limit=abc', 'limit'];
+        yield 'gender' => ['gender=x', 'gender'];
+        yield 'array param' => ['q[]=a', 'q'];
+        yield 'q too long' => ['q=' . str_repeat('a', 101), 'q'];
+        yield 'cursor garbage' => ['cursor=abc', 'cursor'];
+        yield 'cursor with symbols' => ['cursor=' . rawurlencode('e30=!'), 'cursor'];
+    }
+
+    #[DataProvider('invalidListQueryProvider')]
+    public function testInvalidListQueryReturns400WithFieldError(string $query, string $field): void
+    {
+        $result = $this->get('users?' . $query);
+
+        $this->assertErrorContract($result, 400, 'Invalid query parameters');
+        $this->assertArrayHasKey($field, $this->json($result)['errors']);
+    }
+
+    public function testCursorFromAnotherSortIsRejected(): void
+    {
+        $this->createUsers([['email' => 'a@example.com'], ['email' => 'b@example.com']]);
+        $cursor = $this->json($this->get('users?limit=1&sort=last_name'))['meta']['next_cursor'];
+
+        $result = $this->get('users?limit=1&sort=age&cursor=' . $cursor);
+
+        $this->assertErrorContract($result, 400, 'Invalid query parameters');
+        $this->assertArrayHasKey('cursor', $this->json($result)['errors']);
+    }
+
+    public function testTamperedCursorValueTypeIsRejected(): void
+    {
+        $cursor = rtrim(strtr(base64_encode('{"s":"age","d":"asc","v":"1 OR 1=1","id":1}'), '+/', '-_'), '=');
+
+        $result = $this->get('users?sort=age&cursor=' . $cursor);
+
+        $this->assertErrorContract($result, 400, 'Invalid query parameters');
     }
 
     public function testShowReturnsUserWithAllFields(): void
@@ -235,7 +439,7 @@ final class UsersApiTest extends CIUnitTestCase
         $secret = 'SQLSTATE[HY000] SELECT * FROM users in C:\secret\path\File.php';
 
         $model = $this->createMock(UserModel::class);
-        $model->method('findAll')->willThrowException(new RuntimeException($secret));
+        $model->method('listPage')->willThrowException(new RuntimeException($secret));
         Factories::injectMock('models', UserModel::class, $model);
 
         $result = $this->callThroughExceptionHandler('GET', 'users');
@@ -645,15 +849,33 @@ final class UsersApiTest extends CIUnitTestCase
         $this->assertErrorContract($result, 412, 'Precondition failed');
     }
 
-    public function testUpdateWithoutIfMatchReturns428(): void
+    public function testUpdateWithoutIfMatchAppliesToCurrentVersion(): void
     {
         $id = $this->createUser();
+        model(UserModel::class)->updateIfVersion($id, $this->validUser(['age' => 31]), 1);
 
         $result = $this->putUser($id, $this->validUser(['age' => 45]), ifMatch: null);
 
-        $this->assertErrorContract($result, 428, 'Precondition required');
-        $this->assertArrayHasKey('If-Match', $this->json($result)['errors']);
-        $this->seeInDatabase('users', ['id' => $id, 'age' => 30, 'version' => 1]);
+        $result->assertStatus(200);
+        $result->assertHeader('ETag', '"3"');
+        $this->seeInDatabase('users', ['id' => $id, 'age' => 45, 'version' => 3]);
+    }
+
+    public function testUpdateWithoutIfMatchAndInvalidDataReturns422(): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->putUser($id, $this->validUser(['email' => 'no-es-email']), ifMatch: null);
+
+        $this->assertValidationFailed($result, ['email' => '']);
+        $this->seeInDatabase('users', ['id' => $id, 'version' => 1]);
+    }
+
+    public function testUpdateWithoutIfMatchUnknownIdReturns404(): void
+    {
+        $result = $this->putUser(999999, $this->validUser(), ifMatch: null);
+
+        $this->assertErrorContract($result, 404, 'User not found');
     }
 
     /**

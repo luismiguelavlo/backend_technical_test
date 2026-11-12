@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Libraries\UserListQuery;
+use CodeIgniter\Database\BaseBuilder;
 use CodeIgniter\Model;
 use Throwable;
 
@@ -54,7 +56,7 @@ class UserModel extends Model
     ];
 
     /**
-     * Normalizes email before validation (BaseModel validates before
+     * Normalizes input before validation (BaseModel validates before
      * running beforeInsert callbacks, so callbacks would be too late).
      *
      * @param array|object|null $row
@@ -64,14 +66,14 @@ class UserModel extends Model
     public function insert($row = null, bool $returnID = true)
     {
         if (is_array($row)) {
-            $row = $this->normalizeEmail($row);
+            $row = $this->normalize($row);
         }
 
         return parent::insert($row, $returnID);
     }
 
     /**
-     * Normalizes email and injects `id` so `is_unique[users.email,id,{id}]`
+     * Normalizes input and injects `id` so `is_unique[users.email,id,{id}]`
      * excludes the record being updated. `id` is not in $allowedFields, so
      * it is discarded before persisting.
      *
@@ -81,7 +83,7 @@ class UserModel extends Model
     public function update($id = null, $row = null): bool
     {
         if (is_array($row)) {
-            $row = $this->normalizeEmail($row);
+            $row = $this->normalize($row);
 
             if (is_scalar($id)) {
                 $row['id'] = $id;
@@ -128,12 +130,117 @@ class UserModel extends Model
     }
 
     /**
-     * trim + lowercase `email` when it is a string.
+     * One page of the users list with keyset pagination (specs/04):
+     * `WHERE <filters> AND (sort, id) after cursor ORDER BY sort, id LIMIT n+1`.
+     * Cost does not grow with the page depth (no OFFSET).
+     *
+     * @return array{rows: list<array<string, mixed>>, next_cursor: string|null, total: int|null}
      */
-    private function normalizeEmail(array $row): array
+    public function listPage(UserListQuery $query): array
     {
+        // Exact count only on request: it scans every matching row.
+        $total = null;
+        if ($query->withTotal) {
+            $countBuilder = $this->db->table($this->table);
+            $this->applyFilters($countBuilder, $query);
+            $total = $countBuilder->countAllResults();
+        }
+
+        $builder = $this->db->table($this->table);
+        $this->applyFilters($builder, $query);
+
+        if ($query->after !== null) {
+            $this->applyKeyset($builder, $query->sort, $query->dir, $query->after);
+        }
+
+        if ($query->sort !== 'id') {
+            $builder->orderBy($query->sort, $query->dir);
+        }
+
+        // One extra row tells whether there is a next page.
+        $rows = $builder->orderBy('id', $query->dir)->limit($query->limit + 1)->get()->getResultArray();
+
+        $nextCursor = null;
+        if (count($rows) > $query->limit) {
+            array_pop($rows);
+            $nextCursor = $query->cursorAfter($rows[array_key_last($rows)]);
+        }
+
+        return ['rows' => $rows, 'next_cursor' => $nextCursor, 'total' => $total];
+    }
+
+    /**
+     * Gender equality + every search term as a prefix of first name, last name
+     * or email. Prefix LIKE ('ana%') can use B-tree indexes; the column
+     * collation (utf8mb4_unicode_ci) makes it case- and accent-insensitive.
+     */
+    private function applyFilters(BaseBuilder $builder, UserListQuery $query): void
+    {
+        if ($query->gender !== null) {
+            $builder->where('gender', $query->gender);
+        }
+
+        foreach ($query->terms as $rawTerm) {
+            // CI 4.7 like() emits `ESCAPE '!'` but leaves % and _ in the value
+            // unescaped (verified: q=% compiled to LIKE '%%'), so a user "%"
+            // would match everything. Escape them with that same character.
+            $esc  = $this->db->likeEscapeChar;
+            $term = str_replace([$esc, '%', '_'], [$esc . $esc, $esc . '%', $esc . '_'], $rawTerm);
+
+            $builder->groupStart()
+                ->like('first_name', $term, 'after')
+                ->orLike('last_name', $term, 'after')
+                ->orLike('email', $term, 'after')
+                ->groupEnd();
+        }
+    }
+
+    /**
+     * Rows strictly after the cursor in `ORDER BY sort dir, id dir`:
+     * `sort > v OR (sort = v AND id > last_id)` (mirrored for desc).
+     * Expanded instead of a row comparison `(sort, id) > (v, id)`, which MySQL
+     * does not always turn into an index range scan.
+     *
+     * @param array{value: int|string, id: int} $after
+     */
+    private function applyKeyset(BaseBuilder $builder, string $sort, string $dir, array $after): void
+    {
+        $op = $dir === 'asc' ? '>' : '<';
+
+        if ($sort === 'id') {
+            $builder->where("id {$op}", $after['id']);
+
+            return;
+        }
+
+        // $sort is whitelisted by UserListQuery::SORTABLE.
+        $builder->groupStart()
+            ->where("{$sort} {$op}", $after['value'])
+            ->orGroupStart()
+            ->where($sort, $after['value'])
+            ->where("id {$op}", $after['id'])
+            ->groupEnd()
+            ->groupEnd();
+    }
+
+    /**
+     * trim string fields; lowercase `email`; empty `telephone` → null (so
+     * "no telephone" is always stored as NULL, whether omitted or "").
+     */
+    private function normalize(array $row): array
+    {
+        foreach (['first_name', 'last_name', 'email', 'telephone'] as $field) {
+            if (isset($row[$field]) && is_string($row[$field])) {
+                $row[$field] = trim($row[$field]);
+            }
+        }
+
         if (isset($row['email']) && is_string($row['email'])) {
-            $row['email'] = strtolower(trim($row['email']));
+            $row['email'] = strtolower($row['email']);
+        }
+
+        if (array_key_exists('telephone', $row) && $row['telephone'] === '') {
+            $row['telephone'] = null;
         }
 
         return $row;

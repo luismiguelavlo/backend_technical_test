@@ -8,7 +8,7 @@ use Faker\Factory;
 use RuntimeException;
 
 /**
- * Seeds 20 reproducible users (fixed Faker seed).
+ * Seeds 20 reproducible users (fixed Faker seed). Safe to run more than once.
  */
 class UserSeeder extends Seeder
 {
@@ -31,6 +31,12 @@ class UserSeeder extends Seeder
                 'age'        => $faker->numberBetween(18, 80),
                 'telephone'  => $faker->boolean(30) ? null : $faker->numerify('+34 6## ### ###'),
             ];
+
+            // Idempotent: the fixed seed yields the same emails on every run,
+            // so a re-run skips users that already exist instead of failing.
+            if ($model->where('email', $row['email'])->countAllResults() > 0) {
+                continue;
+            }
 
             // insert() normalizes email, validates and sets timestamps.
             if ($model->insert($row) === false) {

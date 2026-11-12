@@ -2,6 +2,7 @@
 
 > **Status:** Implemented · **Depends on:** SPEC 01, SPEC 02 · **Date:** 2026-11-12
 > **Objective:** Evitar que un `PUT /users/{id}` sobrescriba en silencio un cambio guardado por otro cliente después de que el primero cargó el usuario (escenario Q3 de la prueba), con versión por fila, `ETag` / `If-Match` y respuestas 412/428.
+> **Amendment (2026-11-12):** `If-Match` pasa a ser opcional. Sin la cabecera el `PUT` se aplica sobre la versión actual (last write wins) en vez de responder 428, para respetar el contrato `200/404/422` del enunciado. Con `If-Match` el comportamiento 412 no cambia. Las menciones a 428 abajo quedan como historial.
 
 ## Scope
 

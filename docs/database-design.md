@@ -95,15 +95,23 @@ CREATE TABLE users (
 | `PRIMARY` | `id` | PK clustered | `GET/PUT/DELETE /users/{id}`. |
 | `uk_users_email` | `email` | UNIQUE | Regla "email único"; también acelera la regla `is_unique` de validación. |
 
-No se crean más índices ahora: con ≥10 registros y sin búsqueda/orden en el alcance, serían costo de escritura sin beneficio.
+**Índices del listado** (implementados en `specs/04-users-list-query.md`, migración `AddListIndexesToUsers`): `GET /users` busca por prefijo, ordena y pagina con keyset en la BD.
 
-**Índices futuros** (escenario Q2 — búsqueda por nombre, orden y paginación con ~500k filas):
+| Índice | Columnas | Uso |
+| --- | --- | --- |
+| `idx_users_last_name_id` | `last_name, id` | `ORDER BY last_name, id` + rango keyset; `last_name LIKE 'gar%'`. |
+| `idx_users_first_name_id` | `first_name, id` | Ídem para `first_name`. |
+| `idx_users_age_id` | `age, id` | `ORDER BY age, id` + rango keyset. |
+
+`sort=id` usa la PK y `sort=email` usa `uk_users_email` (único, así que no necesita desempate).
+
+**Futuros**, si el volumen o los requisitos lo piden:
 
 | Índice propuesto | Uso |
 | --- | --- |
-| `idx_users_last_first (last_name, first_name, id)` | Búsqueda por prefijo (`LIKE 'gar%'`) y orden por apellido; `id` como desempate para keyset pagination. |
-| `idx_users_created_id (created_at, id)` | Orden por fecha de alta + keyset pagination. |
-| `FULLTEXT ft_users_name (first_name, last_name)` | Solo si se requiere búsqueda por subcadena/palabra (`LIKE '%x%'` no usa B-tree). |
+| `FULLTEXT ft_users_search (first_name, last_name, email)` | Búsqueda por palabra o subcadena (`LIKE '%x%'` no usa B-tree) y para evitar el `OR` entre columnas. |
+| `(gender, last_name, id)` | Filtrar por género y ordenar por apellido con un solo índice. |
+| `(created_at, id)` | Si se ordena por fecha de alta (hoy `id` cumple ese papel).
 
 Criterio: indexar solo columnas presentes en `WHERE` / `ORDER BY` de consultas reales, verificado con `EXPLAIN`.
 
@@ -242,11 +250,11 @@ php spark db:seed UserSeeder
 - Unicidad de email por índice: protege contra condiciones de carrera que `is_unique` solo no evita (dos `POST` simultáneos). Capturar el error de clave duplicada (MySQL 1062) y responder 422.
 
 **Concurrencia (escenario Q3)**
-- **Implementado** (`specs/03-optimistic-concurrency.md`): columna `version INT UNSIGNED NOT NULL DEFAULT 1`, migración `AddVersionToUsers`. El cliente envía la versión leída en `If-Match`; el `UPDATE ... WHERE id = ? AND version = ?` afecta 0 filas si otro agente guardó antes → `412` (sin `If-Match` → `428`).
+- **Implementado** (`specs/03-optimistic-concurrency.md`): columna `version INT UNSIGNED NOT NULL DEFAULT 1`, migración `AddVersionToUsers`. El cliente envía la versión leída en `If-Match`; el `UPDATE ... WHERE id = ? AND version = ?` afecta 0 filas si otro agente guardó antes → `412` (sin `If-Match` el `PUT` se aplica sobre la versión actual: last write wins).
 - Se descartó usar `updated_at` como versión: la resolución de segundo de `DATETIME` provoca colisiones.
 
 **Rendimiento (escenario Q2)**
-- `LIMIT/OFFSET` profundo escanea y descarta `OFFSET` filas → degrada linealmente. Usar keyset pagination: `WHERE (last_name, id) > (?, ?) ORDER BY last_name, id LIMIT 20`, apoyado en `idx_users_last_first`.
+- `LIMIT/OFFSET` profundo escanea y descarta `OFFSET` filas → degrada linealmente. **Implementado** (SPEC 04): keyset pagination `WHERE last_name > ? OR (last_name = ? AND id > ?) ORDER BY last_name, id LIMIT 21`, apoyado en `idx_users_last_name_id`.
 
 **Escalabilidad**
 - Una tabla de este tamaño no requiere particionado ni sharding. Si crece la lectura: réplicas de lectura + caché del listado.

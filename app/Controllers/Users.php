@@ -2,7 +2,8 @@
 
 namespace App\Controllers;
 
-use App\Exceptions\ApiResponseException;
+use App\Libraries\InvalidListQueryException;
+use App\Libraries\UserListQuery;
 use App\Models\UserModel;
 use CodeIgniter\HTTP\ResponseInterface;
 
@@ -15,9 +16,27 @@ class Users extends BaseApiController
 {
     protected $modelName = UserModel::class;
 
+    /**
+     * Search, filter, sort and keyset pagination (specs/04):
+     * ?q=&gender=&sort=&dir=&limit=&cursor=&with_total=1
+     */
     public function index(): ResponseInterface
     {
-        return $this->respondData($this->model->findAll());
+        try {
+            $query = UserListQuery::fromArray($this->request->getGet());
+        } catch (InvalidListQueryException $e) {
+            return $this->respondError(400, 'Invalid query parameters', $e->errors);
+        }
+
+        $page = $this->model->listPage($query);
+
+        return $this->respondData($page['rows'], 200, [
+            'limit'       => $query->limit,
+            'sort'        => $query->sort,
+            'dir'         => $query->dir,
+            'next_cursor' => $page['next_cursor'],
+            'total'       => $page['total'],
+        ]);
     }
 
     /**
@@ -52,8 +71,10 @@ class Users extends BaseApiController
      * field is cleared. The ID always comes from the URL (the model overrides
      * any body `id` with it).
      *
-     * Optimistic concurrency (specs/03): the client must send the ETag it
-     * loaded in `If-Match`. 428 without it; 412 if the user changed since.
+     * Optimistic concurrency (specs/03): a client that sends the ETag it
+     * loaded in `If-Match` gets 412 if the user changed since. Without
+     * `If-Match` the update applies to the current version (last write wins),
+     * keeping the 200/404/422 contract of the test spec.
      *
      * @param int|string|null $id
      */
@@ -65,7 +86,7 @@ class Users extends BaseApiController
             return $this->respondUserNotFound();
         }
 
-        $expectedVersion = $this->readIfMatchVersion();
+        $expectedVersion = $this->readIfMatchVersion() ?? (int) $current['version'];
         $data            = $this->readUserBody() + ['telephone' => null];
 
         // Stale copy: reject before validating data the client built from it.
@@ -127,20 +148,15 @@ class Users extends BaseApiController
 
     /**
      * Parses `If-Match: "<version>"` (strong ETag, as sent by etagFor()).
-     * Missing → 428. A malformed value or `*` never matches → -1 (412).
-     *
-     * @throws ApiResponseException 428 when the header is missing
+     * Missing → null (unconditional update). A malformed value or `*` never
+     * matches → -1 (412).
      */
-    private function readIfMatchVersion(): int
+    private function readIfMatchVersion(): ?int
     {
         $header = trim($this->request->getHeaderLine('If-Match'));
 
         if ($header === '') {
-            throw new ApiResponseException($this->respondError(
-                428,
-                'Precondition required',
-                ['If-Match' => 'Envía el ETag del usuario cargado en la cabecera If-Match.'],
-            ));
+            return null;
         }
 
         return preg_match('/^"(\d{1,10})"$/', $header, $matches) === 1 ? (int) $matches[1] : -1;

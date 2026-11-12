@@ -44,10 +44,17 @@ abstract class BaseApiController extends ResourceController
 
     /**
      * @param array<array-key, mixed>|null $data
+     * @param array<string, mixed>|null    $meta list metadata (pagination); omitted when null
      */
-    protected function respondData(?array $data, int $status = 200): ResponseInterface
+    protected function respondData(?array $data, int $status = 200, ?array $meta = null): ResponseInterface
     {
-        return $this->respond(['data' => $data], $status);
+        $body = ['data' => $data];
+
+        if ($meta !== null) {
+            $body['meta'] = $meta;
+        }
+
+        return $this->respond($body, $status);
     }
 
     /**
