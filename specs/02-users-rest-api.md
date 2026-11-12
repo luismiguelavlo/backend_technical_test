@@ -1,6 +1,7 @@
 # SPEC 02 — API REST JSON de /users con CORS
 
 > **Status:** Implemented · **Depends on:** SPEC 01 · **Date:** 2026-11-12
+> **Amended by:** [SPEC 03](03-optimistic-concurrency.md) — `version` en el recurso, cabecera `ETag`, `PUT` condicionado por `If-Match` (412/428) y CORS que expone `ETag`. Las secciones afectadas lo indican.
 > **Objective:** Exponer el CRUD JSON de `/users` (200/201/204/400/404/415/422/500) sobre `UserModel`, con contrato de respuesta uniforme, CORS configurable por `.env` y tests de integración contra la BD de pruebas.
 
 ## Scope
@@ -13,7 +14,7 @@
 - `app/Database/DuplicateKeyTranslator.php`: traduce MySQL 1062 a campo, identificando la restricción por nombre.
 - `UserModel`: añadir el mapa `$uniqueKeys = ['uk_users_email' => 'email']`. Sin otros cambios de comportamiento.
 - `app/Exceptions/ApiExceptionHandler.php` + `Config\Exceptions::handler()`: 404/500 JSON para rutas con prefijo en `$apiPrefixes = ['users']`; resto → handler por defecto de CI4.
-- CORS nativo CI4: `Config\Cors` lee `CORS_ALLOWED_ORIGINS` (lista por comas), métodos `GET, POST, PUT, DELETE, OPTIONS`, cabeceras `Content-Type, Authorization, If-Match`, `supportsCredentials = false`, sin `*`; filtro `cors` aplicado a las rutas de `/users` en `Config\Filters`.
+- CORS nativo CI4: `Config\Cors` lee `CORS_ALLOWED_ORIGINS` (lista por comas), métodos `GET, POST, PUT, DELETE, OPTIONS`, cabeceras `Content-Type, Authorization, If-Match`, `supportsCredentials = false`, sin `*` (SPEC 03 añade `exposedHeaders = ['ETag']`); filtro `cors` aplicado a las rutas de `/users` en `Config\Filters`.
 - `.env.example`: añadir `CORS_ALLOWED_ORIGINS = http://localhost:5173`.
 - `tests/feature/UsersApiTest.php` (BD `tests`): éxito, 400, 404, 415, 422 (validación y email duplicado), 500 simulado, 204 sin body, CORS (origen permitido/no permitido, preflight) y ruta ajena a la API con handler por defecto.
 - `tests/unit/DuplicateKeyTranslatorTest.php`: 1062 con `uk_users_email` → `email`; 1062 con otra clave → `null`; otro código → `null`.
@@ -23,7 +24,7 @@
 
 - Autenticación, JWT, sesiones, CSRF.
 - Paginación, búsqueda, ordenación (el envelope queda preparado para `meta`).
-- Control de concurrencia (`If-Match`/`ETag`, 409/412); solo se permite la cabecera en CORS.
+- Control de concurrencia (`If-Match`/`ETag`, 409/412); solo se permite la cabecera en CORS. → Implementado en SPEC 03.
 - `PATCH` / actualización parcial.
 - Capa de servicio (`UserService`).
 - `supportsCredentials = true`.
@@ -34,7 +35,7 @@
 
 ## Data model
 
-Sin cambios en la tabla `users`. Reutiliza migración y `UserModel` de SPEC 01.
+Sin cambios en la tabla `users`. Reutiliza migración y `UserModel` de SPEC 01. (SPEC 03 añade después la columna `version`.)
 
 ### Recurso `User` (JSON)
 
@@ -47,12 +48,13 @@ Sin cambios en la tabla `users`. Reutiliza migración y `UserModel` de SPEC 01.
   "gender": "female",
   "telephone": null,
   "age": 34,
+  "version": 1,
   "created_at": "2026-11-12 10:00:00",
   "updated_at": "2026-11-12 10:00:00"
 }
 ```
 
-Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
+Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación. `version` existe desde SPEC 03.
 
 ### Request body (POST / PUT)
 
@@ -70,6 +72,7 @@ Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
 - `Content-Type: application/json` obligatorio.
 - PUT = reemplazo completo: mismos requeridos que POST.
 - `id`, `created_at`, `updated_at` y campos desconocidos en el body → descartados (`$allowedFields`; `id` siempre de la URL).
+- *SPEC 03:* `version` en el body también se descarta. `PUT` exige la cabecera `If-Match: "<version>"`.
 
 ### Contrato de éxito
 
@@ -80,6 +83,8 @@ Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
 | `POST /users`        | 201    | `{ "data": User }`        |
 | `PUT /users/{id}`    | 200    | `{ "data": User }`        |
 | `DELETE /users/{id}` | 204    | vacío                     |
+
+*SPEC 03:* `GET /users/{id}`, `POST` y `PUT` incluyen además la cabecera `ETag: "<version>"`.
 
 ### Contrato de error
 
@@ -98,8 +103,10 @@ Tal como lo devuelve `UserModel` (`$returnType = 'array'`), sin transformación.
 | 400    | `Malformed JSON body`    | JSON inválido, body vacío o JSON que no es objeto                                        |
 | 404    | `User not found`         | ID inexistente o `/users/0`                                                              |
 | 404    | `Not found`              | Ruta API sin match (`/users/abc`, `/users/-1`, `/users/1/foo`) vía `ApiExceptionHandler` |
+| 412    | `Precondition failed`    | *SPEC 03:* `If-Match` no coincide con la versión actual (`errors.version`, `ETag` actual) |
 | 415    | `Unsupported media type` | POST/PUT sin `Content-Type: application/json`                                            |
 | 422    | `Validation failed`      | Errores de `UserModel` o duplicado `uk_users_email`                                      |
+| 428    | `Precondition required`  | *SPEC 03:* `PUT` sin cabecera `If-Match` (`errors.If-Match`)                             |
 | 500    | `Internal server error`  | Cualquier excepción no esperada en ruta API                                              |
 
 ### Componentes nuevos
@@ -155,7 +162,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 
 - [ ] `php spark routes` lista exactamente `GET/POST /users`, `GET/PUT/DELETE /users/([0-9]+)` y `OPTIONS` para ambas, más `GET /`.
 - [ ] `GET /users` → 200, `Content-Type: application/json`, body `{ "data": [...] }` con todos los usuarios.
-- [ ] `GET /users/{id}` existente → 200 con `{ "data": {...} }` y los 9 campos del recurso.
+- [ ] `GET /users/{id}` existente → 200 con `{ "data": {...} }` y los 9 campos del recurso (10 con `version` desde SPEC 03).
 - [ ] `GET /users/999999`, `/users/0`, `/users/-1`, `/users/abc` → 404 con `status`, `message` y `errors: {}`.
 - [ ] Ruta inexistente bajo `/users` (p. ej. `/users/1/foo`) → 404 JSON con el contrato.
 - [ ] Toda respuesta de error trae `status` (igual al código HTTP), `message` y `errors` como objeto JSON (nunca `[]`).
@@ -171,7 +178,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 - [ ] `Content-Type: application/x-www-form-urlencoded` → 415.
 - [ ] `id` y campos desconocidos en el body no afectan la fila creada.
 
-**PUT**
+**PUT** (desde SPEC 03 todos los casos envían `If-Match` con la versión actual; los casos de concurrencia están en SPEC 03)
 
 - [ ] Body completo válido → 200 con el registro actualizado (`updated_at` cambia o se mantiene coherente).
 - [ ] ID inexistente → 404.
@@ -239,7 +246,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 - **Yes:** CORS con `Config\Cors` + filtro `cors` nativo, orígenes desde `CORS_ALLOWED_ORIGINS`. Sin duplicar lógica; configurable por entorno sin tocar código.
 - **No:** `Access-Control-Allow-Origin: *`. Incompatible con credenciales futuras y demasiado permisivo.
 - **Yes:** `supportsCredentials = false`. No hay autenticación todavía.
-- **Yes:** `If-Match` y `Authorization` ya en cabeceras permitidas. Prepara concurrencia y auth sin implementarlas.
+- **Yes:** `If-Match` y `Authorization` ya en cabeceras permitidas. Prepara concurrencia y auth sin implementarlas. (La concurrencia se implementó en SPEC 03.)
 - **Yes:** PHP 8.2+ y CI 4.7.6. Lo exigen `composer.json` y el framework instalado; la prueba pide 8.1+, no alcanzable sin degradar dependencias.
 - **Yes:** tests feature contra BD `tests` y unit para el traductor. Cubren el contrato real HTTP + BD y la lógica aislada de MySQL.
 - **Yes:** 500 y 1062 simulados vía `Factories::injectMock()`. Reproducible sin depender de carreras reales.
@@ -264,7 +271,7 @@ Varios orígenes: `http://localhost:5173,https://app.example.com`. Vacía → ni
 
 - Autenticación, JWT, sesiones, CSRF.
 - Paginación, búsqueda, ordenación.
-- Control de concurrencia (`If-Match`/`ETag`, 409/412).
+- Control de concurrencia (`If-Match`/`ETag`, 409/412). → SPEC 03.
 - `PATCH` / actualización parcial.
 - `UserService`.
 - `supportsCredentials = true`.

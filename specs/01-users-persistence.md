@@ -1,6 +1,7 @@
 # SPEC 01 — Tabla users, UserModel y UserSeeder
 
 > **Status:** Implemented · **Depends on:** — · **Date:** 2026-11-12
+> **Amended by:** [SPEC 03](03-optimistic-concurrency.md) — columna `version`, `version` en `$allowedFields` y `UserModel::updateIfVersion()`. Las secciones afectadas lo indican.
 > **Objective:** Crear la persistencia de usuarios (migración `users`, `UserModel` con validación y normalización de email, `UserSeeder` con 20 usuarios reproducibles) cubierta por tests de modelo, según `docs/database-design.md`.
 
 ## Scope
@@ -20,7 +21,7 @@
 - Controladores y rutas REST (`/users`).
 - CORS.
 - Manejo HTTP de errores (404/422) y conversión del error MySQL 1062 a 422.
-- Control de concurrencia (`If-Match`, columna `version`).
+- Control de concurrencia (`If-Match`, columna `version`). → Implementado en SPEC 03.
 - Índices adicionales para alto volumen (`idx_users_last_first`, etc.).
 - Normalización en `insertBatch()` / `updateBatch()` (no usados por la API).
 - Cambios en `podman-compose.yml` o `docker/mysql/init/` (ya crean `ci4` y `ci4_test`).
@@ -41,6 +42,7 @@ Fuente de verdad: DDL en `docs/database-design.md` §3. Resumen:
 | `gender`     | `ENUM('male','female','other')` | No   | —                          |
 | `telephone`  | `VARCHAR(20)`                   | Sí   | default `NULL`             |
 | `age`        | `TINYINT UNSIGNED`              | No   | `CHECK ck_users_age` 1–120 |
+| `version`    | `INT UNSIGNED`                  | No   | default `1` — *SPEC 03, migración `AddVersionToUsers`* |
 | `created_at` | `DATETIME`                      | Sí   | —                          |
 | `updated_at` | `DATETIME`                      | Sí   | —                          |
 
@@ -54,6 +56,7 @@ protected $primaryKey    = 'id';
 protected $returnType    = 'array';
 protected $useTimestamps = true;
 protected $allowedFields = ['first_name', 'last_name', 'email', 'gender', 'telephone', 'age'];
+// SPEC 03 añade 'version' (solo la escribe updateIfVersion(); los controladores la quitan del body).
 
 protected $validationRules = [
     'id'         => 'permit_empty|is_natural_no_zero',
@@ -63,6 +66,7 @@ protected $validationRules = [
     'gender'     => 'required|in_list[male,female,other]',
     'telephone'  => 'permit_empty|max_length[20]|regex_match[/^[0-9+\-() ]+$/]',
     'age'        => 'required|is_natural_no_zero|less_than_equal_to[120]',
+    // SPEC 03: 'version' => 'permit_empty|is_natural_no_zero',
 ];
 ```
 
@@ -73,6 +77,7 @@ Comportamiento añadido:
 - `insert($row)` / `update($id, $row)`: si `$row` trae `email` string → `strtolower(trim($email))` antes de `parent::`.
 - `update($id, $row)`: si `$id` es escalar y `$row` es array → `$row['id'] = $id` antes de `parent::update()`.
 - Normalización en un método privado único (`normalizeEmail(array $row): array`) — sin duplicar lógica.
+- *SPEC 03:* `updateIfVersion($id, $row, $expectedVersion)` — `UPDATE` condicionado a `version` (bloqueo optimista). Reutiliza `update()`, así que conserva la normalización y la inyección de `id`.
 
 ### Seeder
 
@@ -147,7 +152,7 @@ Comportamiento añadido:
 - Controladores y rutas REST (`/users`).
 - CORS.
 - Manejo HTTP de errores y conversión de MySQL 1062 a 422.
-- Control de concurrencia.
+- Control de concurrencia. → SPEC 03.
 - Índices para alto volumen.
 - Normalización en `insertBatch()`/`updateBatch()`.
 - Cambios en Docker.

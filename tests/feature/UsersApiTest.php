@@ -147,7 +147,7 @@ final class UsersApiTest extends CIUnitTestCase
         $result->assertStatus(200);
         $data = $this->json($result)['data'];
         $this->assertSame(
-            ['id', 'first_name', 'last_name', 'email', 'gender', 'telephone', 'age', 'created_at', 'updated_at'],
+            ['id', 'first_name', 'last_name', 'email', 'gender', 'telephone', 'age', 'version', 'created_at', 'updated_at'],
             array_keys($data),
         );
         $this->assertSame('ana.garcia@example.com', $data['email']);
@@ -276,18 +276,37 @@ final class UsersApiTest extends CIUnitTestCase
     }
 
     /**
-     * @param array<array-key, mixed>|string $body array → JSON-encoded; string → sent raw
+     * @param array<array-key, mixed>|string $body    array → JSON-encoded; string → sent raw
+     * @param array<string, string>          $headers extra request headers
      */
     private function sendJson(
         string $method,
         string $path,
         array|string $body,
         string $contentType = 'application/json',
+        array $headers = [],
     ): TestResponse {
         return $this
-            ->withHeaders(['Content-Type' => $contentType])
+            ->withHeaders(['Content-Type' => $contentType] + $headers)
             ->withBody(is_array($body) ? json_encode($body, JSON_THROW_ON_ERROR) : $body)
             ->call($method, $path);
+    }
+
+    /**
+     * PUT /users/{id} with `If-Match` (default: the ETag of a freshly created
+     * user, version 1). Pass null to omit the header.
+     *
+     * @param array<array-key, mixed>|string $body
+     */
+    private function putUser(
+        int|string $id,
+        array|string $body,
+        ?string $ifMatch = '"1"',
+        string $contentType = 'application/json',
+    ): TestResponse {
+        $headers = $ifMatch === null ? [] : ['If-Match' => $ifMatch];
+
+        return $this->sendJson('PUT', "users/{$id}", $body, $contentType, $headers);
     }
 
     /**
@@ -453,7 +472,7 @@ final class UsersApiTest extends CIUnitTestCase
     {
         $id = $this->createUser();
 
-        $result = $this->sendJson('PUT', "users/{$id}", $this->validUser([
+        $result = $this->putUser($id, $this->validUser([
             'first_name' => 'Ana María',
             'email'      => '  Ana.Nueva@Example.com ',
             'age'        => 31,
@@ -472,7 +491,7 @@ final class UsersApiTest extends CIUnitTestCase
 
     public function testUpdateUnknownIdReturns404(): void
     {
-        $result = $this->sendJson('PUT', 'users/999999', $this->validUser());
+        $result = $this->putUser(999999, $this->validUser());
 
         $this->assertErrorContract($result, 404, 'User not found');
         $this->seeNumRecords(0, 'users', []);
@@ -485,7 +504,7 @@ final class UsersApiTest extends CIUnitTestCase
         $data = $this->validUser(['first_name' => 'Cambiado']);
         unset($data[$field]);
 
-        $result = $this->sendJson('PUT', "users/{$id}", $data);
+        $result = $this->putUser($id, $data);
 
         $this->assertValidationFailed($result, [$field => '']);
         $this->seeInDatabase('users', ['id' => $id, 'first_name' => 'Ana']);
@@ -496,7 +515,7 @@ final class UsersApiTest extends CIUnitTestCase
         $this->createUser(['email' => 'otro@example.com']);
         $id = $this->createUser();
 
-        $result = $this->sendJson('PUT', "users/{$id}", $this->validUser(['email' => 'OTRO@example.com']));
+        $result = $this->putUser($id, $this->validUser(['email' => 'OTRO@example.com']));
 
         $this->assertValidationFailed($result, ['email' => 'El email ya está registrado.']);
         $this->seeInDatabase('users', ['id' => $id, 'email' => 'ana.garcia@example.com']);
@@ -506,7 +525,7 @@ final class UsersApiTest extends CIUnitTestCase
     {
         $id = $this->createUser();
 
-        $result = $this->sendJson('PUT', "users/{$id}", $this->validUser(['last_name' => 'López']));
+        $result = $this->putUser($id, $this->validUser(['last_name' => 'López']));
 
         $result->assertStatus(200);
         $this->assertSame('López', $this->json($result)['data']['last_name']);
@@ -518,7 +537,7 @@ final class UsersApiTest extends CIUnitTestCase
         $data = $this->validUser();
         unset($data['telephone']);
 
-        $result = $this->sendJson('PUT', "users/{$id}", $data);
+        $result = $this->putUser($id, $data);
 
         $result->assertStatus(200);
         $this->assertNull($this->json($result)['data']['telephone']);
@@ -529,7 +548,7 @@ final class UsersApiTest extends CIUnitTestCase
         $otherId = $this->createUser(['email' => 'otro@example.com', 'first_name' => 'Otro']);
         $id      = $this->createUser();
 
-        $result = $this->sendJson('PUT', "users/{$id}", $this->validUser([
+        $result = $this->putUser($id, $this->validUser([
             'id'         => $otherId,
             'first_name' => 'Cambiado',
         ]));
@@ -544,11 +563,10 @@ final class UsersApiTest extends CIUnitTestCase
     {
         $id = $this->createUser();
 
-        $result = $this->sendJson(
-            'PUT',
-            "users/{$id}",
+        $result = $this->putUser(
+            $id,
             http_build_query($this->validUser()),
-            'application/x-www-form-urlencoded',
+            contentType: 'application/x-www-form-urlencoded',
         );
 
         $this->assertErrorContract($result, 415, 'Unsupported media type');
@@ -559,10 +577,149 @@ final class UsersApiTest extends CIUnitTestCase
     {
         $id = $this->createUser();
 
-        $result = $this->sendJson('PUT', "users/{$id}", $body);
+        $result = $this->putUser($id, $body);
 
         $this->assertErrorContract($result, 400, 'Malformed JSON body');
         $this->seeInDatabase('users', ['id' => $id, 'first_name' => 'Ana']);
+    }
+
+    // --- Optimistic concurrency (specs/03) -----------------------------------
+
+    public function testShowAndCreateReturnVersionAndMatchingEtag(): void
+    {
+        $created = $this->sendJson('POST', 'users', $this->validUser());
+
+        $created->assertStatus(201);
+        $created->assertHeader('ETag', '"1"');
+        $this->assertSame(1, $this->json($created)['data']['version']);
+
+        $id = $this->json($created)['data']['id'];
+        $this->get("users/{$id}")->assertHeader('ETag', '"1"');
+    }
+
+    public function testCreateIgnoresVersionInBody(): void
+    {
+        $result = $this->sendJson('POST', 'users', $this->validUser(['version' => 99]));
+
+        $result->assertStatus(201);
+        $this->assertSame(1, $this->json($result)['data']['version']);
+    }
+
+    public function testUpdateIncrementsVersionAndReturnsNewEtag(): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->putUser($id, $this->validUser(['age' => 40]));
+
+        $result->assertStatus(200);
+        $result->assertHeader('ETag', '"2"');
+        $this->assertSame(2, $this->json($result)['data']['version']);
+        $this->seeInDatabase('users', ['id' => $id, 'age' => 40, 'version' => 2]);
+    }
+
+    /**
+     * Agent A and agent B load version 1; A saves first, B's save must not
+     * silently overwrite A's change.
+     */
+    public function testSecondUpdateWithStaleVersionReturns412AndKeepsFirstChange(): void
+    {
+        $id = $this->createUser();
+
+        $this->putUser($id, $this->validUser(['telephone' => '+34 699 000 000']))->assertStatus(200);
+
+        $result = $this->putUser($id, $this->validUser(['age' => 45]));
+
+        $this->assertErrorContract($result, 412, 'Precondition failed');
+        $this->assertArrayHasKey('version', $this->json($result)['errors']);
+        $result->assertHeader('ETag', '"2"');
+        $this->seeInDatabase('users', ['id' => $id, 'telephone' => '+34 699 000 000', 'age' => 30, 'version' => 2]);
+    }
+
+    public function testStaleUpdateReturns412EvenWithInvalidData(): void
+    {
+        $id = $this->createUser();
+        model(UserModel::class)->updateIfVersion($id, $this->validUser(['age' => 50]), 1);
+
+        $result = $this->putUser($id, $this->validUser(['email' => 'no-es-email']));
+
+        $this->assertErrorContract($result, 412, 'Precondition failed');
+    }
+
+    public function testUpdateWithoutIfMatchReturns428(): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->putUser($id, $this->validUser(['age' => 45]), ifMatch: null);
+
+        $this->assertErrorContract($result, 428, 'Precondition required');
+        $this->assertArrayHasKey('If-Match', $this->json($result)['errors']);
+        $this->seeInDatabase('users', ['id' => $id, 'age' => 30, 'version' => 1]);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function nonMatchingIfMatchProvider(): iterable
+    {
+        yield 'unquoted' => ['1'];
+        yield 'weak' => ['W/"1"'];
+        yield 'wildcard' => ['*'];
+        yield 'garbage' => ['"abc"'];
+        yield 'future version' => ['"2"'];
+    }
+
+    #[DataProvider('nonMatchingIfMatchProvider')]
+    public function testUpdateWithNonMatchingIfMatchReturns412(string $ifMatch): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->putUser($id, $this->validUser(['age' => 45]), $ifMatch);
+
+        $this->assertErrorContract($result, 412, 'Precondition failed');
+        $this->seeInDatabase('users', ['id' => $id, 'age' => 30, 'version' => 1]);
+    }
+
+    public function testUpdateIgnoresVersionInBody(): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->putUser($id, $this->validUser(['version' => 99]));
+
+        $result->assertStatus(200);
+        $this->assertSame(2, $this->json($result)['data']['version']);
+    }
+
+    public function testValidationErrorDoesNotBumpVersion(): void
+    {
+        $id = $this->createUser();
+
+        $this->assertValidationFailed($this->putUser($id, $this->validUser(['email' => 'no-es-email'])), ['email' => '']);
+        $this->seeInDatabase('users', ['id' => $id, 'version' => 1]);
+
+        // The pending `WHERE version` must not leak into the next query.
+        $this->putUser($id, $this->validUser(['age' => 33]))->assertStatus(200);
+    }
+
+    public function testModelUpdateIfVersionReturnsZeroWhenVersionChanged(): void
+    {
+        $id    = $this->createUser();
+        $model = model(UserModel::class);
+
+        $this->assertSame(1, $model->updateIfVersion($id, $this->validUser(['age' => 31]), 1));
+        $this->assertSame(0, $model->updateIfVersion($id, $this->validUser(['age' => 32]), 1));
+        $this->seeInDatabase('users', ['id' => $id, 'age' => 31, 'version' => 2]);
+    }
+
+    public function testEtagIsExposedToCrossOriginScripts(): void
+    {
+        $id = $this->createUser();
+
+        $result = $this->getFromOrigin("users/{$id}", self::FRONTEND_ORIGIN);
+
+        $this->assertStringContainsStringIgnoringCase(
+            'ETag',
+            $result->response()->getHeaderLine('Access-Control-Expose-Headers'),
+        );
     }
 
     public function testDeleteReturns204WithEmptyBodyAndRemovesUser(): void

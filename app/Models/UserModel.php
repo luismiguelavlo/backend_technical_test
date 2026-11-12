@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use CodeIgniter\Model;
+use Throwable;
 
 /**
  * Users persistence (docs/database-design.md §6).
@@ -13,7 +14,11 @@ class UserModel extends Model
     protected $primaryKey    = 'id';
     protected $returnType    = 'array';
     protected $useTimestamps = true;
-    protected $allowedFields = ['first_name', 'last_name', 'email', 'gender', 'telephone', 'age'];
+    /**
+     * `version` is server-owned (optimistic locking): controllers strip it from
+     * request bodies; only updateIfVersion() writes it.
+     */
+    protected $allowedFields = ['first_name', 'last_name', 'email', 'gender', 'telephone', 'age', 'version'];
 
     /**
      * UNIQUE constraint name => field, used to translate duplicate-key DB
@@ -31,6 +36,7 @@ class UserModel extends Model
         'gender'     => 'required|in_list[male,female,other]',
         'telephone'  => 'permit_empty|max_length[20]|regex_match[/^[0-9+\-() ]+$/]',
         'age'        => 'required|is_natural_no_zero|less_than_equal_to[120]',
+        'version'    => 'permit_empty|is_natural_no_zero',
     ];
 
     protected $validationMessages = [
@@ -83,6 +89,42 @@ class UserModel extends Model
         }
 
         return parent::update($id, $row);
+    }
+
+    /**
+     * Optimistic-lock update: applies $row only if the stored `version` is still
+     * $expectedVersion, and increments it, in a single
+     * `UPDATE ... WHERE id = ? AND version = ?` (no read-then-write race).
+     *
+     * @param int|string           $id
+     * @param array<string, mixed> $row
+     *
+     * @return false|int false on validation errors (see errors()); otherwise the
+     *                   affected rows: 1 = updated, 0 = version mismatch (stale)
+     */
+    public function updateIfVersion($id, array $row, int $expectedVersion): false|int
+    {
+        $row['version'] = $expectedVersion + 1;
+
+        $this->builder()->where('version', $expectedVersion);
+
+        try {
+            $updated = $this->update($id, $row);
+        } catch (Throwable $e) {
+            $this->builder()->resetQuery();
+
+            throw $e;
+        }
+
+        if ($updated === false) {
+            // Validation failed before the query ran: drop the pending WHERE.
+            $this->builder()->resetQuery();
+
+            return false;
+        }
+
+        // `version` always changes on a match, so 0 rows can only mean a mismatch.
+        return $this->db->affectedRows();
     }
 
     /**

@@ -46,8 +46,9 @@ Sin relaciones: el alcance de la prueba define una sola tabla. No hay claves for
 | `gender` | `ENUM('male','female','other')` | No | — | dominio cerrado | required | Conjunto fijo → ENUM valida a nivel BD y ocupa 1 byte. *(Supuesto: el spec no lista valores.)* |
 | `telephone` | `VARCHAR(20)` | **Sí** | `NULL` | — | optional | String, no numérico: conserva `+`, ceros iniciales y formato E.164 (máx. 15 dígitos + símbolos). |
 | `age` | `TINYINT UNSIGNED` | No | — | 0–255 en BD; 1–120 en validación | required | 1 byte, suficiente para edad humana. |
+| `version` | `INT UNSIGNED` | No | `1` | — | — (extra) | Control de concurrencia optimista: +1 en cada `PUT`; se expone como `ETag` (`specs/03-optimistic-concurrency.md`). |
 | `created_at` | `DATETIME` | Sí | `NULL` | — | — (extra) | Auditoría básica; CI4 lo llena con `$useTimestamps = true`. |
-| `updated_at` | `DATETIME` | Sí | `NULL` | — | — (extra) | Ídem; base para control de concurrencia optimista (ver §7). |
+| `updated_at` | `DATETIME` | Sí | `NULL` | — | — (extra) | Ídem (auditoría). La concurrencia usa `version`, no esta columna (ver §8). |
 
 ### Supuestos documentados
 1. **`gender`** — valores `male | female | other`. Si se requieren más (p. ej. `prefer_not_to_say`), se agrega con una nueva migración.
@@ -241,8 +242,8 @@ php spark db:seed UserSeeder
 - Unicidad de email por índice: protege contra condiciones de carrera que `is_unique` solo no evita (dos `POST` simultáneos). Capturar el error de clave duplicada (MySQL 1062) y responder 422.
 
 **Concurrencia (escenario Q3)**
-- Control optimista sin cambiar esquema: el cliente envía el `updated_at` leído (o un `ETag` derivado) en `If-Match`; el `UPDATE ... WHERE id = ? AND updated_at = ?` afecta 0 filas si otro agente guardó antes → `409/412`.
-- Alternativa más robusta: columna `version INT UNSIGNED NOT NULL DEFAULT 1` incrementada en cada update (evita colisiones de resolución de segundo en `DATETIME`).
+- **Implementado** (`specs/03-optimistic-concurrency.md`): columna `version INT UNSIGNED NOT NULL DEFAULT 1`, migración `AddVersionToUsers`. El cliente envía la versión leída en `If-Match`; el `UPDATE ... WHERE id = ? AND version = ?` afecta 0 filas si otro agente guardó antes → `412` (sin `If-Match` → `428`).
+- Se descartó usar `updated_at` como versión: la resolución de segundo de `DATETIME` provoca colisiones.
 
 **Rendimiento (escenario Q2)**
 - `LIMIT/OFFSET` profundo escanea y descarta `OFFSET` filas → degrada linealmente. Usar keyset pagination: `WHERE (last_name, id) > (?, ?) ORDER BY last_name, id LIMIT 20`, apoyado en `idx_users_last_first`.

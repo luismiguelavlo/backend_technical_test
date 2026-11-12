@@ -50,7 +50,7 @@ vendor/bin/phpunit tests/feature/UsersApiTest.php
 vendor/bin/phpunit --filter testMethodName
 ```
 
-- `tests/feature/UsersApiTest.php` — HTTP tests for every endpoint and status code (200/201/204/400/404/415/422, CORS)
+- `tests/feature/UsersApiTest.php` — HTTP tests for every endpoint and status code (200/201/204/400/404/412/415/422/428, CORS, concurrent edits)
 - `tests/database/UserModelTest.php` — model validation and persistence
 - `tests/unit/DuplicateKeyTranslatorTest.php` — duplicate-key → 422 mapping
 
@@ -73,13 +73,14 @@ JSON REST API for the `users` resource.
 | `GET`    | `/users`      | `200` `{ "data": [User] }` | `500`         |
 | `GET`    | `/users/{id}` | `200` `{ "data": User }` | `404`, `500`    |
 | `POST`   | `/users`      | `201` `{ "data": User }` | `400`, `415`, `422`, `500` |
-| `PUT`    | `/users/{id}` | `200` `{ "data": User }` | `400`, `404`, `415`, `422`, `500` |
+| `PUT`    | `/users/{id}` | `200` `{ "data": User }` | `400`, `404`, `412`, `415`, `422`, `428`, `500` |
 | `DELETE` | `/users/{id}` | `204` (empty body)       | `404`, `500`    |
 | `OPTIONS`| `/users`, `/users/{id}` | `204` (CORS preflight) | — |
 
 - `{id}` must be digits; anything else (`/users/abc`, `/users/-1`) is `404 Not found`.
 - `PUT` is a **full replacement**: same required fields as `POST`; an omitted `telephone` is cleared (`null`).
-- `id`, `created_at`, `updated_at` and unknown fields in the body are ignored. The ID always comes from the URL.
+- `PUT` requires `If-Match` with the user's current ETag (see [Concurrent edits](#concurrent-edits-optimistic-locking)).
+- `id`, `version`, `created_at`, `updated_at` and unknown fields in the body are ignored. The ID always comes from the URL.
 
 ### User resource
 
@@ -92,6 +93,7 @@ JSON REST API for the `users` resource.
 | `gender`     | string          | required, one of `male`, `female`, `other`       |
 | `telephone`  | string \| null  | optional, max 20, digits, spaces and `+-()`      |
 | `age`        | int             | required, 1–120                                  |
+| `version`    | int             | read-only; starts at 1, +1 on every successful `PUT`; also sent as `ETag` |
 | `created_at` | string          | read-only, `YYYY-MM-DD HH:MM:SS`                 |
 | `updated_at` | string          | read-only, `YYYY-MM-DD HH:MM:SS`                 |
 
@@ -108,6 +110,7 @@ curl -i -X POST http://localhost:8080/users \
 ```http
 HTTP/1.1 201 Created
 Content-Type: application/json; charset=UTF-8
+ETag: "1"
 
 {
   "data": {
@@ -118,6 +121,7 @@ Content-Type: application/json; charset=UTF-8
     "gender": "female",
     "telephone": "+34 600 000 000",
     "age": 34,
+    "version": 1,
     "created_at": "2026-11-12 10:00:00",
     "updated_at": "2026-11-12 10:00:00"
   }
@@ -128,9 +132,10 @@ Other calls:
 
 ```bash
 curl http://localhost:8080/users                 # 200 { "data": [...] }
-curl http://localhost:8080/users/1               # 200 { "data": {...} }
+curl -i http://localhost:8080/users/1            # 200 { "data": {...} } + ETag: "1"
 curl -X PUT http://localhost:8080/users/1 \
   -H 'Content-Type: application/json' \
+  -H 'If-Match: "1"' \
   -d '{"first_name":"Ana","last_name":"López","email":"ana@example.com","gender":"female","age":35}'
 curl -i -X DELETE http://localhost:8080/users/1  # 204, empty body
 ```
@@ -154,16 +159,29 @@ Field messages come from the model's validation rules (the custom ones are in Sp
 | `400` | `Malformed JSON body`    | Invalid JSON, empty body, or JSON that is not an object (e.g. `[]`)  |
 | `404` | `User not found`         | The ID does not exist (including `/users/0`)                         |
 | `404` | `Not found`              | No matching route under `/users` (e.g. `/users/abc`, `/users/1/foo`) |
+| `412` | `Precondition failed`    | `If-Match` does not match the current version (someone saved first); `errors.version`, response `ETag` = current version |
 | `415` | `Unsupported media type` | `POST`/`PUT` without `Content-Type: application/json`                |
 | `422` | `Validation failed`      | Field validation errors (`errors.<field>`), including duplicate email |
+| `428` | `Precondition required`  | `PUT` without `If-Match` (`errors.If-Match`)                          |
 | `500` | `Internal server error`  | Any unexpected error. No details are returned in any environment; they are logged in `writable/logs/` |
+
+### Concurrent edits (optimistic locking)
+
+Two clients can load the same user and save in turn. A plain `PUT` would let the second save silently overwrite the first one, so `PUT` is conditional:
+
+1. `GET /users/{id}`, `POST` and `PUT` return `ETag: "<version>"`. `version` is also in the body, including in `GET /users`.
+2. The client sends it back with `If-Match: "<version>"` on `PUT /users/{id}`.
+3. The server applies the change with a single `UPDATE ... WHERE id = ? AND version = ?` and increments `version`, so there is no read-then-write race.
+4. If the version changed since the client loaded the user, the response is `412` with the current `ETag`. The client must reload the user and reapply its change. A `PUT` without `If-Match` gets `428`.
+
+Only strong ETags of the form `"<digits>"` are accepted. `*` and weak ETags (`W/"1"`) never match. Design: `specs/03-optimistic-concurrency.md`.
 
 ### CORS
 
 CORS uses CodeIgniter's built-in `cors` filter on the `/users` routes:
 
 - Allowed origins: `CORS_ALLOWED_ORIGINS` (comma-separated, exact match). If it is empty or unset, no origin is allowed. `*` is ignored.
-- Methods: `GET, POST, PUT, DELETE, OPTIONS`. Headers: `Content-Type, Authorization, If-Match`.
+- Methods: `GET, POST, PUT, DELETE, OPTIONS`. Headers: `Content-Type, Authorization, If-Match`. Exposed to scripts: `ETag`.
 - Credentials are not supported (`Access-Control-Allow-Credentials` is never sent).
 
 ### `.env` variables
