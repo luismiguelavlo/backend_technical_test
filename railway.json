@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "sh -c \"php spark migrate --all && php spark db:seed UserSeeder && php -S 0.0.0.0:${PORT:-8080} -t public vendor/codeigniter4/framework/system/rewrite.php\"",
+    "healthcheckPath": "/users",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
