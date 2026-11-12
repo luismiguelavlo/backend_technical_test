@@ -11,6 +11,10 @@
     },
     "require": {
         "php": "^8.2",
+        "ext-intl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-mysqli": "*",
         "codeigniter4/framework": "^4.7"
     },
     "require-dev": {
@@ -33,6 +37,9 @@
         }
     },
     "config": {
+        "platform": {
+            "php": "8.2.0"
+        },
         "optimize-autoloader": true,
         "preferred-install": "dist",
         "sort-packages": true
